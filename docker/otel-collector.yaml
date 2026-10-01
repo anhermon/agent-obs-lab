@@ -1,4 +1,9 @@
-# Forwards OTLP to Jaeger. Used by docker compose (optional local path).
+# OTel Collector fan-out for agent-obs-lab.
+# Used by: docker compose -f docker-compose.fanout.yml up -d
+#
+# Prefer Phoenix first (local, zero-key), then Langfuse for scores
+# (see otel-collector.langfuse.yaml — do not dual-SDK the toy agent).
+
 receivers:
   otlp:
     protocols:
@@ -16,6 +21,10 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
+  otlp/phoenix:
+    endpoint: phoenix:4317
+    tls:
+      insecure: true
   debug:
     verbosity: basic
 
@@ -24,4 +33,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp/jaeger, debug]
+      exporters: [otlp/jaeger, otlp/phoenix, debug]

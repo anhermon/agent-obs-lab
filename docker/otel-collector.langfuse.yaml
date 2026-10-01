@@ -1,0 +1,46 @@
+# Optional Collector config: Jaeger + Phoenix + Langfuse (scores).
+#
+# Usage:
+#   1. export LANGFUSE_AUTH_STRING="$(printf '%s' "${LANGFUSE_PUBLIC_KEY}:${LANGFUSE_SECRET_KEY}" | base64 -w0 2>/dev/null || printf '%s' "${LANGFUSE_PUBLIC_KEY}:${LANGFUSE_SECRET_KEY}" | base64)"
+#   2. export LANGFUSE_OTLP_ENDPOINT="${LANGFUSE_OTLP_ENDPOINT:-https://cloud.langfuse.com/api/public/otel}"
+#   3. Point the fanout compose volume at this file instead of otel-collector.yaml
+#      (or bind-mount it over /etc/otelcol/config.yaml).
+#
+# Still no Langfuse / Phoenix SDK in lab/agent.py — mcp-trace remains the only
+# span producer; the Collector fans out.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  otlp/phoenix:
+    endpoint: phoenix:4317
+    tls:
+      insecure: true
+  otlphttp/langfuse:
+    endpoint: ${env:LANGFUSE_OTLP_ENDPOINT}
+    headers:
+      Authorization: "Basic ${env:LANGFUSE_AUTH_STRING}"
+      x-langfuse-ingestion-version: "4"
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, otlp/phoenix, otlphttp/langfuse, debug]
