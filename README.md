@@ -9,7 +9,7 @@ Ship a usable skeleton: a toy multi-tool agent, [mcp-trace](https://github.com/a
 
 ## Goals (1–2 week MVP)
 
-- See every MCP `tools/call` as an OTel span (timing, ok/error), under one **turn-level** parent when possible — plus **eval** signals (pass/fail, score, rubric) on that parent, not only duration waterfalls.
+- See every MCP `tools/call` as an OTel span (timing, ok/error), under one **turn-level** parent when possible — plus **comparative agent-performance evals** (duration / cost / response quality across variants) and single-turn Tags on that parent.
 - Run locally with light deps (Python stdlib agent + server).
 - Optional Jaeger (or SigNoz) backend via Compose / OTLP; optional Collector → Phoenix (then Langfuse).
 - Stub / Collector wiring for Langfuse and Phoenix (env vars + where signals go — **no dual-SDK in the toy agent**).
@@ -34,15 +34,42 @@ flowchart LR
 | `lab/mcp_server.py` | stdio MCP server — `get_weather`, `calculate`, `lookup_faq` | **Working** |
 | `lab/agent.py` | Deterministic multi-tool turn (≥2 calls) + `agent.turn` parent span | **Working** (needs proxy up) |
 | `lab/eval.py` | Turn rubric → pass/fail, score, assertions on the span + JSON artifact | **Working** |
+| `lab/compare.py` | Comparative performance evals (duration / cost / quality × variants) | **Working** (offline) |
 | [mcp-trace](https://github.com/anhermon/mcp-trace) | Transparent proxy → OTel spans | **Working** (install separately) |
 | `docker compose` | Jaeger all-in-one with OTLP | **Working** (optional) |
 | `docker-compose.fanout.yml` | Collector → Jaeger + Phoenix | **Working** (optional) |
 | Langfuse | Collector exporter + docs (scores) | **Documented** (keys required) |
 | `docs/blog/*` | Two draft outlines | **Drafts** |
 
-## Evals demo
+## Comparative evals
 
-Turn rubric `lab.turn.v1` lands on the `agent.turn` span as Tags (`eval.pass`, `eval.score`, …). Expand Tags in Jaeger — the summary line truncates until expanded.
+**Evals here means agent performance across variants** — same task, multiple prompt / tool-config / model stubs, scored on **duration**, **cost**, and **response quality**, with visible diffs. Tool `isError` / presence checks are secondary (see [Turn attributes](#turn-attributes-jaeger) below).
+
+Offline fixture (no Docker, no real LLM):
+
+```bash
+python3 lab/compare.py
+# → artifacts/compare-report.json + artifacts/compare-report.md
+```
+
+Sample report (checked in): [`docs/evals/sample-compare-report.md`](docs/evals/sample-compare-report.md)
+
+| Variant | Model | Duration (ms) | Cost (USD) | Quality | Overall |
+|---------|-------|-------------:|-----------:|--------:|--------:|
+| `fast_cheap` | `stub-fast-mini` | 420 | 0.0008 | 0.5714 | 0.67 |
+| `quality_first` | `stub-quality-pro` | 1850 | 0.0064 | 1.0 | 0.55 |
+
+![Comparative evals: duration / cost / quality / overall diffs](docs/screenshots/compare-evals-report.png)
+
+- **Faster / cheaper:** `fast_cheap` (Δ duration 1430 ms, Δ cost $0.0056)
+- **Higher quality:** `quality_first` (Δ quality 0.4286 — hits `explains_mcp_trace` + `actionable_tip`)
+- **Overall** blends quality / latency / cost weights from `lab/fixtures/compare_variants.json` (`lab.compare.perf.v1`)
+
+Variants + criteria live under `lab/fixtures/compare_variants.json`. CI runs `lab/test_compare.py` offline.
+
+## Turn attributes (Jaeger)
+
+Single-turn rubric `lab.turn.v1` still lands on the `agent.turn` span as Tags (`eval.pass`, `eval.score`, …) after a live proxy run — useful for tracing one turn, **not** the comparative performance demo above. Expand Tags in Jaeger — the summary line truncates until expanded.
 
 Happy path — `eval.score=1`, `eval.pass=true`:
 
@@ -153,7 +180,7 @@ After a successful happy-path turn, Jaeger shows one **`agent.turn`** root with 
 
 ![Jaeger: agent.turn parent with tool CHILD_OF spans](docs/screenshots/jaeger-agent-turn-parent.png)
 
-Open the **`agent.turn`** span → **Tags** (attributes) and **Logs** (events). Eval Tag crops are also at the top under [Evals demo](#evals-demo). Signals next to timing:
+Open the **`agent.turn`** span → **Tags** (attributes) and **Logs** (events). Eval Tag crops are also at the top under [Turn attributes (Jaeger)](#turn-attributes-jaeger). Signals next to timing:
 
 | Signal | Where in Jaeger | Example |
 |--------|-----------------|---------|
@@ -163,7 +190,7 @@ Open the **`agent.turn`** span → **Tags** (attributes) and **Logs** (events). 
 | `eval.assertion.*.pass` / `.expected` / `.actual` | Tags | per-check detail |
 | `eval.assertion` / `eval.score` | Logs (span events) | same fields, easier to scan |
 
-Contrast path — run `--fail-faq`, then confirm `eval.pass=false`, `faq_answer_ok` FAIL, and a red `lookup_faq` child (see [Evals demo](#evals-demo) for the Tags crop).
+Contrast path — run `--fail-faq`, then confirm `eval.pass=false`, `faq_answer_ok` FAIL, and a red `lookup_faq` child (see [Turn attributes (Jaeger)](#turn-attributes-jaeger) for the Tags crop).
 
 With fan-out (`./scripts/run-local.sh --fanout`), the same spans appear in Phoenix at `:6006`:
 
@@ -185,19 +212,22 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ruff check lab
 pytest -q
+python3 lab/compare.py   # offline comparative performance report → artifacts/
 ```
 
 ## Repo layout
 
 ```
-lab/                       Toy MCP server + agent + eval rubric + smoke tests
-artifacts/                 Runtime eval-result.json (gitignored; written by the agent)
+lab/                       Toy MCP server + agent + eval + compare + smoke tests
+lab/fixtures/              Comparative variant stubs (cost / latency / answers)
+artifacts/                 Runtime eval/compare reports (gitignored)
 scripts/                   run-trace.sh, run-local.sh (orchestrates backends)
 docker-compose.yml         Jaeger (OTLP) — default day-1 path
 docker-compose.fanout.yml  Collector → Jaeger + Phoenix
 docker/                    Collector configs + Dockerfile that bakes them into the image
 docs/blog/                 Draft outlines (not published posts)
-docs/screenshots/          Jaeger / Phoenix UI captures for the README
+docs/evals/                Sample comparative report (checked in)
+docs/screenshots/          Jaeger / Phoenix / compare-report captures for the README
 docs/integrations/         Langfuse, Phoenix, SigNoz
 .github/workflows/         Lint + pytest smoke
 ```
