@@ -149,13 +149,11 @@ Open the **`agent.turn`** span → **Tags** (attributes) and **Logs** (events). 
 | `eval.assertion.*.pass` / `.expected` / `.actual` | Tags | per-check detail |
 | `eval.assertion` / `eval.score` | Logs (span events) | same fields, easier to scan |
 
-Placeholder (Dogfooding will re-capture with Tags/Logs panel open):
-
-![Jaeger: agent.turn Tags showing eval.pass / eval.score / rubric](docs/screenshots/jaeger-eval-attributes.png)
+![Jaeger: agent.turn Tags showing eval.pass / eval.score / rubric](docs/screenshots/jaeger-eval-attributes-detail.png)
 
 Contrast path — run `--fail-faq`, then confirm `eval.pass=false`, `faq_answer_ok` FAIL, and a red `lookup_faq` child:
 
-![Jaeger: failed FAQ turn with eval.pass=false](docs/screenshots/jaeger-eval-fail-faq.png)
+![Jaeger: failed FAQ turn with eval.pass=false](docs/screenshots/jaeger-eval-fail-faq-detail.png)
 
 With fan-out (`./scripts/run-local.sh --fanout`), the same spans appear in Phoenix at `:6006`:
 
