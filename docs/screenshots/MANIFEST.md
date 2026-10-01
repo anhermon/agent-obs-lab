@@ -1,17 +1,12 @@
 # README screenshots
 
-Captured by Dogfooding 2026-10-01 against fanout-capable tip `0908714` (main `3303232`).
-
 | File | What |
 |------|------|
-| `jaeger-agent-turn-parent.png` | Jaeger waterfall: sole root `agent.turn` with CHILD_OF tool spans (`get_weather`, `calculate`, `lookup_faq`) on the default Jaeger path. |
-| `phoenix-fanout-spans.png` | Phoenix `:6006` after `./scripts/run-local.sh --fanout` with the same span set. |
+| `jaeger-agent-turn-parent.png` | Jaeger waterfall: sole root `agent.turn` + tool CHILD_OF (default path). |
+| `phoenix-fanout-spans.png` | Phoenix `:6006` after `--fanout` with the same span set. |
+| `jaeger-eval-attributes.png` | Dogfood: expanded Tags on happy-path `agent.turn` (`eval.score=1`, `eval.pass=true`). |
+| `jaeger-eval-fail-faq.png` | Dogfood: expanded Tags on `--fail-faq` (`eval.score=0.3333`, `eval.pass=false`). |
+| `jaeger-eval-attributes-detail.png` | Optional crop of happy-path eval Tags. |
+| `jaeger-eval-fail-faq-detail.png` | Optional crop of fail-faq eval Tags. |
 
-## Eval attributes (placeholders — Dogfooding re-capture)
-
-| File | Capture when |
-|------|----------------|
-| `jaeger-eval-attributes.png` | Happy path `python3 lab/agent.py` — open `agent.turn` → Tags showing `eval.pass`, `eval.score`, `eval.rubric`, assertion keys |
-| `jaeger-eval-fail-faq.png` | `python3 lab/agent.py --fail-faq` — same panel with `eval.pass=false` + failed `lookup_faq` child visible |
-
-Also useful: Logs/Events panel with `eval.assertion` / `eval.score` event names.
+Captures from Dogfooding 2026-10-01 on PR #4 tip `06ca681`. Expand Tags in Jaeger — the summary line truncates until expanded. Waterfall accent color is not authoritative for `tools_all_ok`; use Tags.
