@@ -1,0 +1,4 @@
+# Runtime: stdlib only (Python 3.10+).
+# Dev / CI:
+pytest>=8.0,<9
+ruff>=0.6,<1
