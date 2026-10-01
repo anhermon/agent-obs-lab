@@ -12,11 +12,16 @@ Turn-level correlation (blog 02 readiness): the agent opens a synthetic
 SDK) and injects W3C ``traceparent`` on every proxy request so mcp-trace
 tool spans become children of the same ``trace_id``.
 
+Eval outcomes (pass/fail, score, rubric, assertion expected vs actual) attach
+to ``agent.turn`` as span attributes + events and land in
+``artifacts/eval-result.json`` — visible in Jaeger without a second SDK.
+
 Usage:
   python lab/agent.py                  # talk to http://localhost:8001
   python lab/agent.py --proxy URL
   python lab/agent.py --fail-faq       # force a failed tool turn for eval demos
   python lab/agent.py --no-turn-span   # skip parent span export (tools still run)
+  python lab/agent.py --no-eval-artifact  # skip writing artifacts/eval-result.json
 """
 
 from __future__ import annotations
@@ -29,8 +34,28 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+try:
+    from lab.eval import (
+        EvalResult,
+        default_artifact_path,
+        eval_to_otlp_attributes,
+        eval_to_otlp_events,
+        evaluate_turn,
+        write_eval_artifact,
+    )
+except ImportError:  # python lab/agent.py without package on PYTHONPATH
+    from eval import (  # type: ignore[no-redef]
+        EvalResult,
+        default_artifact_path,
+        eval_to_otlp_attributes,
+        eval_to_otlp_events,
+        evaluate_turn,
+        write_eval_artifact,
+    )
 
 
 def _log(msg: str) -> None:
@@ -92,12 +117,46 @@ def _export_turn_span(
     end_ns: int,
     fail_faq: bool,
     failed: bool,
+    eval_result: EvalResult | None = None,
 ) -> None:
-    """Export a root ``agent.turn`` span via OTLP/HTTP JSON (no OTel SDK)."""
+    """Export a root ``agent.turn`` span via OTLP/HTTP JSON (no OTel SDK).
+
+    When ``eval_result`` is provided, attach ``eval.*`` attributes and
+    ``eval.assertion`` / ``eval.score`` events so Jaeger shows pass|fail
+    and score next to (not only) duration.
+    """
     status_code = 2 if failed else 1  # OTLP: 1=OK, 2=ERROR
     status: dict[str, Any] = {"code": status_code}
     if failed:
         status["message"] = "one or more tools returned isError"
+    attributes: list[dict[str, Any]] = [
+        {
+            "key": "agent.fail_faq",
+            "value": {"boolValue": fail_faq},
+        },
+        {
+            "key": "agent.tools",
+            "value": {
+                "stringValue": "get_weather,calculate,lookup_faq"
+            },
+        },
+    ]
+    events: list[dict[str, Any]] = []
+    if eval_result is not None:
+        attributes.extend(eval_to_otlp_attributes(eval_result))
+        events.extend(eval_to_otlp_events(eval_result, end_ns))
+    span: dict[str, Any] = {
+        "traceId": trace_id,
+        "spanId": span_id,
+        "name": "agent.turn",
+        "kind": 1,  # INTERNAL
+        "startTimeUnixNano": str(start_ns),
+        "endTimeUnixNano": str(end_ns),
+        "attributes": attributes,
+        "status": status,
+    }
+    if events:
+        span["events"] = events
     body = {
         "resourceSpans": [
             {
@@ -109,29 +168,7 @@ def _export_turn_span(
                 "scopeSpans": [
                     {
                         "scope": {"name": "agent-obs-lab-agent", "version": "0.1.0"},
-                        "spans": [
-                            {
-                                "traceId": trace_id,
-                                "spanId": span_id,
-                                "name": "agent.turn",
-                                "kind": 1,  # INTERNAL
-                                "startTimeUnixNano": str(start_ns),
-                                "endTimeUnixNano": str(end_ns),
-                                "attributes": [
-                                    {
-                                        "key": "agent.fail_faq",
-                                        "value": {"boolValue": fail_faq},
-                                    },
-                                    {
-                                        "key": "agent.tools",
-                                        "value": {
-                                            "stringValue": "get_weather,calculate,lookup_faq"
-                                        },
-                                    },
-                                ],
-                                "status": status,
-                            }
-                        ],
+                        "spans": [span],
                     }
                 ],
             }
@@ -149,6 +186,11 @@ def _export_turn_span(
         with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310 — local OTLP
             resp.read()
         _log(f"exported agent.turn span trace_id={trace_id}")
+        if eval_result is not None:
+            _log(
+                f"eval rubric={eval_result.rubric} pass={eval_result.passed} "
+                f"score={eval_result.score}"
+            )
     except urllib.error.URLError as exc:
         _log(f"turn span export skipped ({endpoint}): {exc}")
         _log("Tool spans may still appear; parent span needs OTLP/HTTP :4318.")
@@ -210,8 +252,13 @@ def run_turn(
     emit_turn_span: bool = True,
     otlp_http: str = "http://localhost:4318",
     service_name: str = "agent-obs-lab",
+    write_artifact: bool = True,
+    artifact_path: Path | None = None,
 ) -> int:
-    """Run one multi-tool agent turn. Returns process exit code."""
+    """Run one multi-tool agent turn. Returns process exit code.
+
+    Exit codes: 0 = tools ok + eval pass; 1 = tool/eval failure; 2 = infra error.
+    """
     trace_id, turn_span_id = _new_ids()
     tp = _traceparent(trace_id, turn_span_id) if emit_turn_span else None
     if tp:
@@ -219,6 +266,8 @@ def run_turn(
     client = McpStreamableClient(proxy, traceparent=tp)
     start_ns = time.time_ns()
     failed = False
+    eval_result: EvalResult | None = None
+    results: list[tuple[str, dict[str, Any] | None]] = []
     try:
         client.connect()
         steps = [
@@ -230,7 +279,6 @@ def run_turn(
         else:
             steps.append(("lookup_faq", {"topic": "mcp-trace"}))
 
-        results: list[tuple[str, dict[str, Any] | None]] = []
         for name, args in steps:
             msg = client.tools_call(name, args)
             results.append((name, msg))
@@ -251,7 +299,24 @@ def run_turn(
             print(f"- {name}: [{flag}] {text}")
 
         failed = any((m or {}).get("result", {}).get("isError") for _, m in results if m)
-        return 1 if failed else 0
+        eval_result = evaluate_turn(results, fail_faq=fail_faq, trace_id=trace_id)
+        print("=== eval ===")
+        print(
+            f"rubric={eval_result.rubric} pass={eval_result.passed} "
+            f"score={eval_result.score}"
+        )
+        for a in eval_result.assertions:
+            mark = "PASS" if a.passed else "FAIL"
+            print(f"- [{mark}] {a.name}: expected={a.expected!r} actual={a.actual!r}")
+        if write_artifact:
+            out = write_eval_artifact(
+                eval_result, artifact_path or default_artifact_path()
+            )
+            _log(f"wrote eval artifact {out}")
+        # Prefer eval failure as exit 1 when tools otherwise look ok
+        if failed or not eval_result.passed:
+            return 1
+        return 0
     except urllib.error.URLError as exc:
         _log(f"proxy unreachable at {proxy}: {exc}")
         _log("Start mcp-trace first — see README 'How to run locally'.")
@@ -272,7 +337,9 @@ def run_turn(
                 end_ns=time.time_ns(),
                 fail_faq=fail_faq,
                 failed=failed,
+                eval_result=eval_result,
             )
+
 
 
 def main() -> None:
@@ -302,11 +369,22 @@ def main() -> None:
         default=os.environ.get("MCP_TRACE_SERVICE_NAME", "agent-obs-lab"),
         help="service.name on the turn parent span",
     )
+    parser.add_argument(
+        "--no-eval-artifact",
+        action="store_true",
+        help="Do not write artifacts/eval-result.json after the turn",
+    )
+    parser.add_argument(
+        "--eval-artifact",
+        default=None,
+        help="Path for eval JSON (default: artifacts/eval-result.json)",
+    )
     args = parser.parse_args()
     scheme = urlparse(args.proxy).scheme
     if scheme not in ("http", "https"):
         _log(f"unsupported proxy scheme: {scheme}")
         sys.exit(2)
+    art = Path(args.eval_artifact) if args.eval_artifact else None
     sys.exit(
         run_turn(
             args.proxy,
@@ -314,6 +392,8 @@ def main() -> None:
             emit_turn_span=not args.no_turn_span,
             otlp_http=args.otlp_http,
             service_name=args.service_name,
+            write_artifact=not args.no_eval_artifact,
+            artifact_path=art,
         )
     )
 

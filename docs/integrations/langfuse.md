@@ -53,6 +53,10 @@ export LANGFUSE_AUTH_STRING="$(printf '%s' "${LANGFUSE_PUBLIC_KEY}:${LANGFUSE_SE
 
 Do not commit real keys. Dogfood with a throwaway Langfuse project.
 
+## Lab eval on the span first
+
+`lab/eval.py` already attaches `eval.pass`, `eval.score`, `eval.rubric`, and per-assertion attributes/events to `agent.turn` (plus `artifacts/eval-result.json`). Prefer reading those in Jaeger / Phoenix before wiring Langfuse scores — still no SDK in the toy agent.
+
 ## Suggested next step
 
-Score a failed `lookup_faq` turn in Langfuse using the shared `trace_id` from `agent.turn` + child tool spans.
+Map `eval.score` / `eval.pass` from the shared `trace_id` on `agent.turn` into a Langfuse score on a failed `lookup_faq` (`--fail-faq`) turn via Collector fan-out.
