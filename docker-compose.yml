@@ -7,8 +7,9 @@
 #   open http://localhost:16686
 #
 # Collector fan-out (Jaeger UI + Phoenix, OTLP via Collector on :4317/:4318):
-#   docker compose -f docker-compose.fanout.yml up -d
+#   docker compose -f docker-compose.fanout.yml up -d --build
 #   # same run-trace / agent commands — mcp-trace still targets localhost:4317
+#   # Use INSTEAD of this file (not an overlay). Prefer ./scripts/run-local.sh --fanout
 #
 # No Compose CLI? Use the docker run one-liner in the README.
 #

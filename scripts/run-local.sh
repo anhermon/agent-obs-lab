@@ -35,7 +35,7 @@ agent-obs-lab — local run
 
 1) Backend already started by this script (or start yourself):
      docker compose up -d
-     # fan-out: docker compose -f docker-compose.fanout.yml up -d
+     # fan-out: docker compose -f docker-compose.fanout.yml up -d --build
      # no compose: see README "docker run one-liner"
 
 2) Proxy (mcp-trace + toy MCP server) in another terminal:
@@ -130,6 +130,41 @@ start_jaeger_run() {
   fi
 }
 
+# Tear down the other compose file / docker-run Jaeger so :4317 is not held by
+# a stale stack (fan-out port-wait must not succeed against default Jaeger).
+stop_default_backends() {
+  if have_compose; then
+    docker compose -f docker-compose.yml down --remove-orphans >/dev/null 2>&1 || true
+  fi
+  docker rm -f agent-obs-lab-jaeger >/dev/null 2>&1 || true
+}
+
+stop_fanout_backends() {
+  if have_compose; then
+    docker compose -f docker-compose.fanout.yml down --remove-orphans >/dev/null 2>&1 || true
+  fi
+}
+
+# Fail loudly if the Collector container is missing or not running. A bare
+# :4317 listen can come from leftover Jaeger and would mask a dead Collector.
+assert_fanout_collector() {
+  local cid status
+  cid="$(docker compose -f docker-compose.fanout.yml ps -q otel-collector 2>/dev/null || true)"
+  if [[ -z "${cid}" ]]; then
+    echo "fan-out: otel-collector container not found after up" >&2
+    docker compose -f docker-compose.fanout.yml ps -a >&2 || true
+    exit 1
+  fi
+  status="$(docker inspect -f '{{.State.Status}}' "${cid}" 2>/dev/null || echo missing)"
+  if [[ "${status}" != "running" ]]; then
+    echo "fan-out: otel-collector is ${status} (expected running)" >&2
+    docker compose -f docker-compose.fanout.yml ps -a >&2 || true
+    docker compose -f docker-compose.fanout.yml logs --tail=80 otel-collector >&2 || true
+    exit 1
+  fi
+  echo "fan-out: otel-collector is running (${cid:0:12})"
+}
+
 ensure_docker
 
 if [[ "${FANOUT}" -eq 1 ]]; then
@@ -137,19 +172,30 @@ if [[ "${FANOUT}" -eq 1 ]]; then
     echo "fan-out requires docker compose; install the Compose v2 plugin (see README)" >&2
     exit 1
   fi
-  echo "starting fan-out stack (Collector → Jaeger + Phoenix) …"
-  docker compose -f docker-compose.fanout.yml up -d
+  echo "stopping default Jaeger stack (if any) so :4317 is free for the Collector …"
+  stop_default_backends
+  echo "starting fan-out stack (Collector → Jaeger + Phoenix; baked config) …"
+  # --build sends docker/ context to the daemon (works under TCP DOCKER_HOST)
+  docker compose -f docker-compose.fanout.yml up -d --build
+  assert_fanout_collector
+  wait_otlp
+  # Re-check after port-wait so a crash-loop / empty-config death cannot exit 0
+  # against a stale listener on :4317.
+  sleep 1
+  assert_fanout_collector
 else
   if have_compose; then
+    echo "stopping fan-out stack (if any) so :4317 is free for Jaeger …"
+    stop_fanout_backends
     echo "starting Jaeger via docker compose …"
     docker compose up -d
   else
     echo "docker compose unavailable — falling back to docker run one-liner …"
     start_jaeger_run
   fi
+  wait_otlp
 fi
 
-wait_otlp
 echo
 print_runbook
 echo

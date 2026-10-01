@@ -1,0 +1,9 @@
+# Bake Collector config into the image so fan-out works when DOCKER_HOST is TCP
+# (host bind-mounts resolve on the *daemon* filesystem and become empty dirs).
+#
+# Default: Phoenix + Jaeger (otel-collector.yaml)
+# Langfuse: rebuild with --build-arg COLLECTOR_CONFIG=otel-collector.langfuse.yaml
+ARG COLLECTOR_IMAGE=otel/opentelemetry-collector-contrib:0.128.0
+FROM ${COLLECTOR_IMAGE}
+ARG COLLECTOR_CONFIG=otel-collector.yaml
+COPY ${COLLECTOR_CONFIG} /etc/otelcol/config.yaml
