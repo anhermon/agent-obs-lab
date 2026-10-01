@@ -40,6 +40,20 @@ flowchart LR
 | Langfuse | Collector exporter + docs (scores) | **Documented** (keys required) |
 | `docs/blog/*` | Two draft outlines | **Drafts** |
 
+## Evals demo
+
+Turn rubric `lab.turn.v1` lands on the `agent.turn` span as Tags (`eval.pass`, `eval.score`, …). Expand Tags in Jaeger — the summary line truncates until expanded.
+
+Happy path — `eval.score=1`, `eval.pass=true`:
+
+![Happy path: eval.score=1 on agent.turn Tags](docs/screenshots/jaeger-eval-attributes-detail.png)
+
+Failed FAQ (`python3 lab/agent.py --fail-faq`) — `eval.score≈0.3333`, `eval.pass=false`:
+
+![Fail-faq: eval.score≈0.3333 on agent.turn Tags](docs/screenshots/jaeger-eval-fail-faq-detail.png)
+
+Reproduce after [How to run locally](#how-to-run-locally); full waterfall + Phoenix shots are under [What you should see](#what-you-should-see).
+
 ## How to run locally
 
 ### Prerequisites
@@ -139,7 +153,7 @@ After a successful happy-path turn, Jaeger shows one **`agent.turn`** root with 
 
 ![Jaeger: agent.turn parent with tool CHILD_OF spans](docs/screenshots/jaeger-agent-turn-parent.png)
 
-Open the **`agent.turn`** span → **Tags** (attributes) and **Logs** (events). You should see evaluation signals next to timing — not only a duration waterfall:
+Open the **`agent.turn`** span → **Tags** (attributes) and **Logs** (events). Eval Tag crops are also at the top under [Evals demo](#evals-demo). Signals next to timing:
 
 | Signal | Where in Jaeger | Example |
 |--------|-----------------|---------|
@@ -149,11 +163,7 @@ Open the **`agent.turn`** span → **Tags** (attributes) and **Logs** (events). 
 | `eval.assertion.*.pass` / `.expected` / `.actual` | Tags | per-check detail |
 | `eval.assertion` / `eval.score` | Logs (span events) | same fields, easier to scan |
 
-![Jaeger: agent.turn Tags showing eval.pass / eval.score / rubric](docs/screenshots/jaeger-eval-attributes-detail.png)
-
-Contrast path — run `--fail-faq`, then confirm `eval.pass=false`, `faq_answer_ok` FAIL, and a red `lookup_faq` child:
-
-![Jaeger: failed FAQ turn with eval.pass=false](docs/screenshots/jaeger-eval-fail-faq-detail.png)
+Contrast path — run `--fail-faq`, then confirm `eval.pass=false`, `faq_answer_ok` FAIL, and a red `lookup_faq` child (see [Evals demo](#evals-demo) for the Tags crop).
 
 With fan-out (`./scripts/run-local.sh --fanout`), the same spans appear in Phoenix at `:6006`:
 
