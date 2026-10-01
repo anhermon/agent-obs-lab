@@ -126,3 +126,17 @@ def test_calculate_rejects_names():
     finally:
         proc.kill()
         proc.wait(timeout=5)
+
+
+def test_traceparent_helpers():
+    """Turn-level W3C ids stay valid without requiring mcp-trace / Docker."""
+    from lab.agent import _new_ids, _traceparent
+
+    trace_id, span_id = _new_ids()
+    assert len(trace_id) == 32
+    assert len(span_id) == 16
+    assert int(trace_id, 16) != 0
+    assert int(span_id, 16) != 0
+    tp = _traceparent(trace_id, span_id)
+    assert tp == f"00-{trace_id}-{span_id}-01"
+    assert _traceparent(trace_id, span_id, sampled=False).endswith("-00")

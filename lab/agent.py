@@ -7,16 +7,24 @@ tools/call requests through mcp-trace.
 mcp-trace --stdio exposes **Streamable HTTP** on POST / (not legacy SSE).
 The agent speaks that transport so every tools/call becomes an OTel span.
 
+Turn-level correlation (blog 02 readiness): the agent opens a synthetic
+``agent.turn`` root span (OTLP/HTTP JSON, stdlib only — no Langfuse/Phoenix
+SDK) and injects W3C ``traceparent`` on every proxy request so mcp-trace
+tool spans become children of the same ``trace_id``.
+
 Usage:
   python lab/agent.py                  # talk to http://localhost:8001
   python lab/agent.py --proxy URL
   python lab/agent.py --fail-faq       # force a failed tool turn for eval demos
+  python lab/agent.py --no-turn-span   # skip parent span export (tools still run)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import secrets
 import sys
 import time
 import urllib.error
@@ -29,8 +37,21 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+def _new_ids() -> tuple[str, str]:
+    """Return (trace_id_hex32, span_id_hex16) for W3C Trace Context."""
+    return secrets.token_hex(16), secrets.token_hex(8)
+
+
+def _traceparent(trace_id: str, span_id: str, sampled: bool = True) -> str:
+    flags = "01" if sampled else "00"
+    return f"00-{trace_id}-{span_id}-{flags}"
+
+
 def _post_rpc(
-    url: str, payload: dict[str, Any], session_id: str | None = None
+    url: str,
+    payload: dict[str, Any],
+    session_id: str | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """POST one JSON-RPC message. Returns (body_json_or_None, session_id)."""
     data = json.dumps(payload).encode("utf-8")
@@ -40,6 +61,8 @@ def _post_rpc(
     }
     if session_id:
         headers["Mcp-Session-Id"] = session_id
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(url, data=data, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 — local lab proxy
         new_sid = resp.headers.get("Mcp-Session-Id") or session_id
@@ -59,14 +82,92 @@ def _post_rpc(
         return found, new_sid
 
 
+def _export_turn_span(
+    *,
+    otlp_http: str,
+    service_name: str,
+    trace_id: str,
+    span_id: str,
+    start_ns: int,
+    end_ns: int,
+    fail_faq: bool,
+    failed: bool,
+) -> None:
+    """Export a root ``agent.turn`` span via OTLP/HTTP JSON (no OTel SDK)."""
+    status_code = 2 if failed else 1  # OTLP: 1=OK, 2=ERROR
+    status: dict[str, Any] = {"code": status_code}
+    if failed:
+        status["message"] = "one or more tools returned isError"
+    body = {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": service_name}},
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {"name": "agent-obs-lab-agent", "version": "0.1.0"},
+                        "spans": [
+                            {
+                                "traceId": trace_id,
+                                "spanId": span_id,
+                                "name": "agent.turn",
+                                "kind": 1,  # INTERNAL
+                                "startTimeUnixNano": str(start_ns),
+                                "endTimeUnixNano": str(end_ns),
+                                "attributes": [
+                                    {
+                                        "key": "agent.fail_faq",
+                                        "value": {"boolValue": fail_faq},
+                                    },
+                                    {
+                                        "key": "agent.tools",
+                                        "value": {
+                                            "stringValue": "get_weather,calculate,lookup_faq"
+                                        },
+                                    },
+                                ],
+                                "status": status,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    endpoint = otlp_http.rstrip("/") + "/v1/traces"
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310 — local OTLP
+            resp.read()
+        _log(f"exported agent.turn span trace_id={trace_id}")
+    except urllib.error.URLError as exc:
+        _log(f"turn span export skipped ({endpoint}): {exc}")
+        _log("Tool spans may still appear; parent span needs OTLP/HTTP :4318.")
+
+
 class McpStreamableClient:
     """Minimal MCP client for Streamable HTTP (mcp-trace --stdio front door)."""
 
-    def __init__(self, proxy: str) -> None:
+    def __init__(self, proxy: str, traceparent: str | None = None) -> None:
         self.base = proxy.rstrip("/")
         self.url = self.base + "/"
         self.session_id: str | None = None
         self._next_id = 1
+        self._traceparent = traceparent
+
+    def _headers(self) -> dict[str, str] | None:
+        if not self._traceparent:
+            return None
+        return {"traceparent": self._traceparent}
 
     def connect(self) -> None:
         _log(f"connecting Streamable HTTP {self.url}")
@@ -85,6 +186,7 @@ class McpStreamableClient:
             self.url,
             {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
             self.session_id,
+            self._headers(),
         )
 
     def call(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
@@ -92,7 +194,7 @@ class McpStreamableClient:
         self._next_id += 1
         payload = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
         _log(f"→ {method} {json.dumps(params)[:120]}")
-        body, self.session_id = _post_rpc(self.url, payload, self.session_id)
+        body, self.session_id = _post_rpc(self.url, payload, self.session_id, self._headers())
         if body is not None:
             _log(f"← {json.dumps(body)[:200]}")
         return body
@@ -101,9 +203,22 @@ class McpStreamableClient:
         return self.call("tools/call", {"name": name, "arguments": arguments})
 
 
-def run_turn(proxy: str, fail_faq: bool = False) -> int:
+def run_turn(
+    proxy: str,
+    fail_faq: bool = False,
+    *,
+    emit_turn_span: bool = True,
+    otlp_http: str = "http://localhost:4318",
+    service_name: str = "agent-obs-lab",
+) -> int:
     """Run one multi-tool agent turn. Returns process exit code."""
-    client = McpStreamableClient(proxy)
+    trace_id, turn_span_id = _new_ids()
+    tp = _traceparent(trace_id, turn_span_id) if emit_turn_span else None
+    if tp:
+        _log(f"turn traceparent={tp}")
+    client = McpStreamableClient(proxy, traceparent=tp)
+    start_ns = time.time_ns()
+    failed = False
     try:
         client.connect()
         steps = [
@@ -140,10 +255,24 @@ def run_turn(proxy: str, fail_faq: bool = False) -> int:
     except urllib.error.URLError as exc:
         _log(f"proxy unreachable at {proxy}: {exc}")
         _log("Start mcp-trace first — see README 'How to run locally'.")
+        failed = True
         return 2
     except Exception as exc:  # noqa: BLE001
         _log(f"agent error: {exc}")
+        failed = True
         return 2
+    finally:
+        if emit_turn_span:
+            _export_turn_span(
+                otlp_http=otlp_http,
+                service_name=service_name,
+                trace_id=trace_id,
+                span_id=turn_span_id,
+                start_ns=start_ns,
+                end_ns=time.time_ns(),
+                fail_faq=fail_faq,
+                failed=failed,
+            )
 
 
 def main() -> None:
@@ -158,12 +287,35 @@ def main() -> None:
         action="store_true",
         help="Call lookup_faq with an unknown topic to produce a failed span",
     )
+    parser.add_argument(
+        "--no-turn-span",
+        action="store_true",
+        help="Do not emit agent.turn parent span / traceparent (legacy sibling roots)",
+    )
+    parser.add_argument(
+        "--otlp-http",
+        default=os.environ.get("OTEL_EXPORTER_OTLP_HTTP_ENDPOINT", "http://localhost:4318"),
+        help="OTLP/HTTP base for the turn parent span (default: http://localhost:4318)",
+    )
+    parser.add_argument(
+        "--service-name",
+        default=os.environ.get("MCP_TRACE_SERVICE_NAME", "agent-obs-lab"),
+        help="service.name on the turn parent span",
+    )
     args = parser.parse_args()
     scheme = urlparse(args.proxy).scheme
     if scheme not in ("http", "https"):
         _log(f"unsupported proxy scheme: {scheme}")
         sys.exit(2)
-    sys.exit(run_turn(args.proxy, fail_faq=args.fail_faq))
+    sys.exit(
+        run_turn(
+            args.proxy,
+            fail_faq=args.fail_faq,
+            emit_turn_span=not args.no_turn_span,
+            otlp_http=args.otlp_http,
+            service_name=args.service_name,
+        )
+    )
 
 
 if __name__ == "__main__":

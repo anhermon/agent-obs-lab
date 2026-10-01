@@ -17,11 +17,12 @@ Builders who have traces but no eval loop yet.
 
 2. **Produce a failed turn in the lab**  
    ```bash
-   docker compose up -d
+   ./scripts/run-local.sh          # or --fanout for Phoenix too
    ./scripts/run-trace.sh
-   python lab/agent.py --fail-faq
+   python3 lab/agent.py --fail-faq
    ```  
-   Find the trace in Jaeger: parent turn (if present) + child tool spans; `isError` / error text on `lookup_faq`.
+   Find the trace in Jaeger (wait ~2–5s): root `agent.turn` + child tool spans sharing one `trace_id`; `isError` / error text on `lookup_faq`.  
+   (Still outline-only — capture screenshots / `lab/fixtures/` later before publishing.)
 
 3. **Minimal eval rubric (stub)**  
    - Did every required tool succeed?  

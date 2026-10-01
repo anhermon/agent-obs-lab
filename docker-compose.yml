@@ -1,15 +1,22 @@
 # Optional local backends for agent-obs-lab.
 #
-# Default (Jaeger all-in-one with OTLP):
+# Default day-1 path (Jaeger all-in-one with OTLP on the host):
 #   docker compose up -d
-#   ./scripts/run-trace.sh          # host: mcp-trace wraps lab/mcp_server.py
-#   python lab/agent.py
+#   ./scripts/run-trace.sh
+#   python3 lab/agent.py
 #   open http://localhost:16686
+#
+# Collector fan-out (Jaeger UI + Phoenix, OTLP via Collector on :4317/:4318):
+#   docker compose -f docker-compose.fanout.yml up -d
+#   # same run-trace / agent commands — mcp-trace still targets localhost:4317
+#
+# No Compose CLI? Use the docker run one-liner in the README.
 #
 # SigNoz (heavier): see docs/integrations/signoz.md
 #
 # Full in-compose proxy needs a Python-capable image; day-1 path keeps
-# mcp-trace on the host (go install) so the scratch GHCR binary stays tiny.
+# mcp-trace on the host (go install / release binary) so the scratch GHCR
+# binary stays tiny.
 
 services:
   jaeger:
