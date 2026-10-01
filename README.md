@@ -83,10 +83,12 @@ mcp-trace version
 
 ```bash
 ./scripts/run-local.sh --fanout
-# or: docker compose -f docker-compose.fanout.yml up -d
+# or: docker compose -f docker-compose.fanout.yml up -d --build
 # Jaeger:  http://localhost:16686
 # Phoenix: http://localhost:6006
 ```
+
+Collector config is **baked into the image** (`docker/Dockerfile.otel-collector`) so `--fanout` works when `DOCKER_HOST` is TCP (host bind-mounts of the yaml resolve on the daemon FS and become empty dirs). `run-local.sh --fanout` also tears down the default Jaeger stack first and fails if the Collector container is not running — so a stale `:4317` listener cannot make the script exit 0.
 
 **No Compose? `docker run` one-liner for Jaeger:**
 
@@ -106,6 +108,8 @@ docker run -d --name agent-obs-lab-jaeger \
 | `docker: command not found` | Install a Docker **client** (e.g. `apt install docker.io`) even if a daemon already runs elsewhere |
 | `Cannot connect … unix:///var/run/docker.sock` | Daemon may be TCP-only: `export DOCKER_HOST=tcp://127.0.0.1:2375` |
 | `docker compose` missing / Debian has no `docker-compose-v2` package | Install the [Compose plugin binary](https://github.com/docker/compose/releases) into `~/.docker/cli-plugins/docker-compose`, **or** use the `docker run` one-liner above |
+| Fan-out Collector crash / empty `/etc/otelcol/config.yaml` under TCP `DOCKER_HOST` | Do **not** bind-mount the yaml; use the baked image (`up -d --build`). Prefer `./scripts/run-local.sh --fanout` |
+| `--fanout` exited 0 but `:4317` is dead / wrong stack | Default Jaeger may still own the port. Re-run `./scripts/run-local.sh` (no flag) or `--fanout` — the script stops the other stack and asserts the Collector is running |
 
 ### 3. Start the traced MCP server
 
@@ -146,7 +150,7 @@ lab/                       Toy MCP server + agent + smoke tests
 scripts/                   run-trace.sh, run-local.sh (orchestrates backends)
 docker-compose.yml         Jaeger (OTLP) — default day-1 path
 docker-compose.fanout.yml  Collector → Jaeger + Phoenix
-docker/                    Collector configs (Phoenix first; Langfuse optional)
+docker/                    Collector configs + Dockerfile that bakes them into the image
 docs/blog/                 Draft outlines (not published posts)
 docs/integrations/         Langfuse, Phoenix, SigNoz
 .github/workflows/         Lint + pytest smoke

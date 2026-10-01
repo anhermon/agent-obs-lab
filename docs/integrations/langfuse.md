@@ -35,8 +35,20 @@ export LANGFUSE_AUTH_STRING="$(printf '%s' "${LANGFUSE_PUBLIC_KEY}:${LANGFUSE_SE
 
 ## Enable Collector → Langfuse
 
-1. Start the fan-out stack but mount `docker/otel-collector.langfuse.yaml` as the Collector config (see comments in that file).
-2. Pass `LANGFUSE_AUTH_STRING` and `LANGFUSE_OTLP_ENDPOINT` into the Collector service environment.
+1. Bake the Langfuse Collector config into the image (do **not** bind-mount under TCP `DOCKER_HOST`):
+
+   ```bash
+   export COLLECTOR_CONFIG=otel-collector.langfuse.yaml
+   export LANGFUSE_AUTH_STRING=…   # see above
+   export LANGFUSE_OTLP_ENDPOINT="${LANGFUSE_OTLP_ENDPOINT:-https://cloud.langfuse.com/api/public/otel}"
+   docker compose -f docker-compose.fanout.yml build --build-arg COLLECTOR_CONFIG="$COLLECTOR_CONFIG" otel-collector
+   # Pass secrets into the running Collector (add env: under otel-collector in compose, or):
+   docker compose -f docker-compose.fanout.yml up -d
+   ```
+
+   Or rebuild via the compose `args` already wired to `${COLLECTOR_CONFIG:-otel-collector.yaml}`.
+
+2. Ensure `LANGFUSE_AUTH_STRING` and `LANGFUSE_OTLP_ENDPOINT` are available to the Collector container environment (compose `environment:` / `.env`).
 3. Keep mcp-trace → `localhost:4317` unchanged.
 
 Do not commit real keys. Dogfood with a throwaway Langfuse project.

@@ -1,5 +1,6 @@
 # OTel Collector fan-out for agent-obs-lab.
-# Used by: docker compose -f docker-compose.fanout.yml up -d
+# Baked into the Collector image via docker/Dockerfile.otel-collector
+# (compose: docker compose -f docker-compose.fanout.yml up -d --build).
 #
 # Prefer Phoenix first (local, zero-key), then Langfuse for scores
 # (see otel-collector.langfuse.yaml — do not dual-SDK the toy agent).

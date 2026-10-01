@@ -3,8 +3,10 @@
 # Usage:
 #   1. export LANGFUSE_AUTH_STRING="$(printf '%s' "${LANGFUSE_PUBLIC_KEY}:${LANGFUSE_SECRET_KEY}" | base64 -w0 2>/dev/null || printf '%s' "${LANGFUSE_PUBLIC_KEY}:${LANGFUSE_SECRET_KEY}" | base64)"
 #   2. export LANGFUSE_OTLP_ENDPOINT="${LANGFUSE_OTLP_ENDPOINT:-https://cloud.langfuse.com/api/public/otel}"
-#   3. Point the fanout compose volume at this file instead of otel-collector.yaml
-#      (or bind-mount it over /etc/otelcol/config.yaml).
+#   3. Bake this file into the Collector image (bind-mounts break under TCP DOCKER_HOST):
+#        export COLLECTOR_CONFIG=otel-collector.langfuse.yaml
+#        docker compose -f docker-compose.fanout.yml up -d --build
+#      See docs/integrations/langfuse.md for env wiring.
 #
 # Still no Langfuse / Phoenix SDK in lab/agent.py — mcp-trace remains the only
 # span producer; the Collector fans out.

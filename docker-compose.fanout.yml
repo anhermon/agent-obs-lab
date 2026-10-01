@@ -1,14 +1,19 @@
 # Collector fan-out stack — use INSTEAD of docker-compose.yml (not as an overlay).
 #
-#   docker compose -f docker-compose.fanout.yml up -d
+#   docker compose -f docker-compose.fanout.yml up -d --build
 #
 # Host OTLP (:4317/:4318) is served by the Collector, which fans out to:
 #   1) Jaeger (always) — UI http://localhost:16686
 #   2) Phoenix (local, zero-key) — UI http://localhost:6006
 #
-# Langfuse (scores / cloud) is documented in docs/integrations/langfuse.md and
-# enabled by swapping in docker/otel-collector.langfuse.yaml — do NOT dual-SDK
-# the toy agent; keep mcp-trace as the sole span producer.
+# Collector config is BAKED into the image (see docker/Dockerfile.otel-collector).
+# Do not bind-mount the yaml — under DOCKER_HOST=tcp://… the daemon resolves the
+# host path on its own filesystem and the mount becomes an empty directory.
+#
+# Langfuse (scores / cloud): rebuild with
+#   COLLECTOR_CONFIG=otel-collector.langfuse.yaml
+# (see docs/integrations/langfuse.md). Do NOT dual-SDK the toy agent; keep
+# mcp-trace as the sole span producer.
 
 services:
   jaeger:
@@ -25,10 +30,13 @@ services:
     # OTLP/gRPC is available on phoenix:4317 inside the compose network
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.128.0
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.otel-collector
+      args:
+        COLLECTOR_CONFIG: ${COLLECTOR_CONFIG:-otel-collector.yaml}
+    image: agent-obs-lab-otel-collector:local
     command: ["--config=/etc/otelcol/config.yaml"]
-    volumes:
-      - ./docker/otel-collector.yaml:/etc/otelcol/config.yaml:ro
     ports:
       - "4317:4317"  # OTLP gRPC (mcp-trace default)
       - "4318:4318"  # OTLP HTTP (agent turn parent span)

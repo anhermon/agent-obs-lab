@@ -15,7 +15,7 @@ MVP status: **Collector fan-out ready** (local, zero-key). No Phoenix SDK in the
 
 ```bash
 ./scripts/run-local.sh --fanout
-# or: docker compose -f docker-compose.fanout.yml up -d
+# or: docker compose -f docker-compose.fanout.yml up -d --build
 ./scripts/run-trace.sh          # still targets localhost:4317 (Collector)
 python3 lab/agent.py --fail-faq
 # wait ~2–5s, then:
