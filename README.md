@@ -132,6 +132,17 @@ You should see ≥2 tool calls (`get_weather`, `calculate`, plus `lookup_faq`). 
 
 In Jaeger, select service **agent-obs-lab**. **Wait ~2–5 seconds** (and refresh the services list) after the agent exits — batch export + UI lag often makes the service look missing if you query immediately.
 
+### What you should see
+
+After a successful happy-path turn, Jaeger shows one **`agent.turn`** root with three **CHILD_OF** tool spans:
+
+![Jaeger: agent.turn parent with tool CHILD_OF spans](docs/screenshots/jaeger-agent-turn-parent.png)
+
+With fan-out (`./scripts/run-local.sh --fanout`), the same spans appear in Phoenix at `:6006`:
+
+![Phoenix: fan-out spans matching Jaeger](docs/screenshots/phoenix-fanout-spans.png)
+
+
 Optional: `python3 lab/agent.py --no-turn-span` restores legacy sibling-root behaviour.
 
 ### Dev / CI without the proxy
@@ -152,6 +163,7 @@ docker-compose.yml         Jaeger (OTLP) — default day-1 path
 docker-compose.fanout.yml  Collector → Jaeger + Phoenix
 docker/                    Collector configs + Dockerfile that bakes them into the image
 docs/blog/                 Draft outlines (not published posts)
+docs/screenshots/          Jaeger / Phoenix UI captures for the README
 docs/integrations/         Langfuse, Phoenix, SigNoz
 .github/workflows/         Lint + pytest smoke
 ```
@@ -167,7 +179,7 @@ docs/integrations/         Langfuse, Phoenix, SigNoz
 1. [Instrument an MCP tool call](docs/blog/01-instrument-mcp-tool-call.md)
 2. [Eval a failed agent turn from a trace](docs/blog/02-eval-failed-agent-turn-from-trace.md)
 
-Keep these as **outlines** until screenshots / fixtures exist.
+Keep these as **outlines** until more fixtures land; Jaeger/Phoenix UI shots live under `docs/screenshots/`.
 
 ## License
 
