@@ -9,7 +9,7 @@ Ship a usable skeleton: a toy multi-tool agent, [mcp-trace](https://github.com/a
 
 ## Goals (1–2 week MVP)
 
-- See every MCP `tools/call` as an OTel span (timing, ok/error), under one **turn-level** parent when possible.
+- See every MCP `tools/call` as an OTel span (timing, ok/error), under one **turn-level** parent when possible — plus **eval** signals (pass/fail, score, rubric) on that parent, not only duration waterfalls.
 - Run locally with light deps (Python stdlib agent + server).
 - Optional Jaeger (or SigNoz) backend via Compose / OTLP; optional Collector → Phoenix (then Langfuse).
 - Stub / Collector wiring for Langfuse and Phoenix (env vars + where signals go — **no dual-SDK in the toy agent**).
@@ -33,6 +33,7 @@ flowchart LR
 |-------|------|--------|
 | `lab/mcp_server.py` | stdio MCP server — `get_weather`, `calculate`, `lookup_faq` | **Working** |
 | `lab/agent.py` | Deterministic multi-tool turn (≥2 calls) + `agent.turn` parent span | **Working** (needs proxy up) |
+| `lab/eval.py` | Turn rubric → pass/fail, score, assertions on the span + JSON artifact | **Working** |
 | [mcp-trace](https://github.com/anhermon/mcp-trace) | Transparent proxy → OTel spans | **Working** (install separately) |
 | `docker compose` | Jaeger all-in-one with OTLP | **Working** (optional) |
 | `docker-compose.fanout.yml` | Collector → Jaeger + Phoenix | **Working** (optional) |
@@ -124,11 +125,11 @@ A startup **WARN** that OTLP is “not yet connected… spans will be lost silen
 
 ```bash
 python3 lab/agent.py
-# failed-turn fixture for eval outline:
+# failed-turn fixture for eval demos (lookup_faq isError → eval fail):
 python3 lab/agent.py --fail-faq
 ```
 
-You should see ≥2 tool calls (`get_weather`, `calculate`, plus `lookup_faq`). The agent also emits an `agent.turn` parent span (OTLP/HTTP `:4318`) and injects `traceparent` so tool spans share one `trace_id`.
+You should see ≥2 tool calls (`get_weather`, `calculate`, plus `lookup_faq`), then an **`=== eval ===`** block with rubric `lab.turn.v1`, pass/fail, score (0–1), and per-assertion expected vs actual. The agent also emits an `agent.turn` parent span (OTLP/HTTP `:4318`) with the same `eval.*` attributes/events, injects `traceparent` so tool spans share one `trace_id`, and writes `artifacts/eval-result.json`.
 
 In Jaeger, select service **agent-obs-lab**. **Wait ~2–5 seconds** (and refresh the services list) after the agent exits — batch export + UI lag often makes the service look missing if you query immediately.
 
@@ -138,12 +139,36 @@ After a successful happy-path turn, Jaeger shows one **`agent.turn`** root with 
 
 ![Jaeger: agent.turn parent with tool CHILD_OF spans](docs/screenshots/jaeger-agent-turn-parent.png)
 
+Open the **`agent.turn`** span → **Tags** (attributes) and **Logs** (events). You should see evaluation signals next to timing — not only a duration waterfall:
+
+| Signal | Where in Jaeger | Example |
+|--------|-----------------|---------|
+| `eval.pass` | Tags | `true` (happy) / `false` (`--fail-faq`) |
+| `eval.score` | Tags | `1` / `0.3333` |
+| `eval.rubric` | Tags | `lab.turn.v1` |
+| `eval.assertion.*.pass` / `.expected` / `.actual` | Tags | per-check detail |
+| `eval.assertion` / `eval.score` | Logs (span events) | same fields, easier to scan |
+
+Placeholder (Dogfooding will re-capture with Tags/Logs panel open):
+
+![Jaeger: agent.turn Tags showing eval.pass / eval.score / rubric](docs/screenshots/jaeger-eval-attributes.png)
+
+Contrast path — run `--fail-faq`, then confirm `eval.pass=false`, `faq_answer_ok` FAIL, and a red `lookup_faq` child:
+
+![Jaeger: failed FAQ turn with eval.pass=false](docs/screenshots/jaeger-eval-fail-faq.png)
+
 With fan-out (`./scripts/run-local.sh --fanout`), the same spans appear in Phoenix at `:6006`:
 
 ![Phoenix: fan-out spans matching Jaeger](docs/screenshots/phoenix-fanout-spans.png)
 
+Companion JSON (always written unless `--no-eval-artifact`):
 
-Optional: `python3 lab/agent.py --no-turn-span` restores legacy sibling-root behaviour.
+```bash
+cat artifacts/eval-result.json
+# {"rubric":"lab.turn.v1","pass":true,"score":1.0,"assertions":[...], ...}
+```
+
+Optional: `python3 lab/agent.py --no-turn-span` restores legacy sibling-root behaviour (eval still prints + writes the JSON artifact).
 
 ### Dev / CI without the proxy
 
@@ -157,7 +182,8 @@ pytest -q
 ## Repo layout
 
 ```
-lab/                       Toy MCP server + agent + smoke tests
+lab/                       Toy MCP server + agent + eval rubric + smoke tests
+artifacts/                 Runtime eval-result.json (gitignored; written by the agent)
 scripts/                   run-trace.sh, run-local.sh (orchestrates backends)
 docker-compose.yml         Jaeger (OTLP) — default day-1 path
 docker-compose.fanout.yml  Collector → Jaeger + Phoenix
@@ -179,7 +205,7 @@ docs/integrations/         Langfuse, Phoenix, SigNoz
 1. [Instrument an MCP tool call](docs/blog/01-instrument-mcp-tool-call.md)
 2. [Eval a failed agent turn from a trace](docs/blog/02-eval-failed-agent-turn-from-trace.md)
 
-Keep these as **outlines** until more fixtures land; Jaeger/Phoenix UI shots live under `docs/screenshots/`.
+Keep these as **outlines** until more fixtures land; Jaeger/Phoenix UI shots live under `docs/screenshots/`. Eval attributes on `agent.turn` are the lab fixture for outline 02.
 
 ## License
 
