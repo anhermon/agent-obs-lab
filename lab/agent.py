@@ -19,7 +19,7 @@ to ``agent.turn`` as span attributes + events and land in
 Usage:
   python lab/agent.py                  # talk to http://localhost:8001
   python lab/agent.py --proxy URL
-  python lab/agent.py --fail-faq       # force a failed tool turn for eval demos
+  python lab/agent.py --fail-faq       # failed rubric; process exits 1 on purpose
   python lab/agent.py --no-turn-span   # skip parent span export (tools still run)
   python lab/agent.py --no-eval-artifact  # skip writing artifacts/eval-result.json
 """
@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import secrets
+import socket
 import sys
 import time
 import urllib.error
@@ -107,6 +108,25 @@ def _post_rpc(
         return found, new_sid
 
 
+
+def _otlp_port_open(otlp_http: str) -> bool:
+    """True when something accepts TCP on the OTLP/HTTP host:port."""
+    raw = otlp_http if "://" in otlp_http else "http://" + otlp_http
+    parsed = urlparse(raw)
+    host = parsed.hostname or "127.0.0.1"
+    if parsed.port is not None:
+        port = parsed.port
+    elif parsed.scheme == "https":
+        port = 443
+    else:
+        port = 80
+    try:
+        with socket.create_connection((host, port), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
 def _export_turn_span(
     *,
     otlp_http: str,
@@ -175,6 +195,13 @@ def _export_turn_span(
         ]
     }
     endpoint = otlp_http.rstrip("/") + "/v1/traces"
+    if not _otlp_port_open(otlp_http):
+        _log(
+            "traces skipped: nothing listening on "
+            f"{endpoint} (no collector). Not a hard failure — "
+            "eval artifact is still written. Start Jaeger for live traces."
+        )
+        return
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
@@ -191,9 +218,14 @@ def _export_turn_span(
                 f"eval rubric={eval_result.rubric} pass={eval_result.passed} "
                 f"score={eval_result.score}"
             )
-    except urllib.error.URLError as exc:
-        _log(f"turn span export skipped ({endpoint}): {exc}")
-        _log("Tool spans may still appear; parent span needs OTLP/HTTP :4318.")
+    except urllib.error.URLError:
+        # Port closed between the probe and POST, or the collector refused.
+        # Eval JSON is already written by the caller; this is not a hard failure.
+        _log(
+            "traces skipped: nothing listening on "
+            f"{endpoint} (no collector). Not a hard failure — "
+            "eval artifact is still written. Start Jaeger for live traces."
+        )
 
 
 class McpStreamableClient:
@@ -352,7 +384,7 @@ def main() -> None:
     parser.add_argument(
         "--fail-faq",
         action="store_true",
-        help="Call lookup_faq with an unknown topic to produce a failed span",
+        help="Force a failed rubric (process exits 1 on purpose, not a crash)",
     )
     parser.add_argument(
         "--no-turn-span",
