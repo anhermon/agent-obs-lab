@@ -17,9 +17,9 @@ to ``agent.turn`` as span attributes + events and land in
 ``artifacts/eval-result.json`` — visible in Jaeger without a second SDK.
 
 Usage:
-  python lab/agent.py                  # talk to http://localhost:8001
+  python lab/agent.py                  # proxy http://localhost:$MCP_TRACE_PORT or :8001
   python lab/agent.py --proxy URL
-  python lab/agent.py --fail-faq       # force a failed tool turn for eval demos
+  python lab/agent.py --fail-faq       # failed rubric; process exits 1 on purpose
   python lab/agent.py --no-turn-span   # skip parent span export (tools still run)
   python lab/agent.py --no-eval-artifact  # skip writing artifacts/eval-result.json
 """
@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import secrets
+import socket
 import sys
 import time
 import urllib.error
@@ -60,6 +61,16 @@ except ImportError:  # python lab/agent.py without package on PYTHONPATH
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
+
+
+def default_proxy_url() -> str:
+    """mcp-trace base URL when --proxy is omitted.
+
+    Matches scripts/run-trace.sh: MCP_TRACE_PORT (default 8001).
+    """
+    raw = os.environ.get("MCP_TRACE_PORT", "").strip()
+    port = raw if raw.isdigit() else "8001"
+    return f"http://localhost:{port}"
 
 
 def _new_ids() -> tuple[str, str]:
@@ -105,6 +116,25 @@ def _post_rpc(
                 if chunk.startswith("{"):
                     found = json.loads(chunk)
         return found, new_sid
+
+
+
+def _otlp_port_open(otlp_http: str) -> bool:
+    """True when something accepts TCP on the OTLP/HTTP host:port."""
+    raw = otlp_http if "://" in otlp_http else "http://" + otlp_http
+    parsed = urlparse(raw)
+    host = parsed.hostname or "127.0.0.1"
+    if parsed.port is not None:
+        port = parsed.port
+    elif parsed.scheme == "https":
+        port = 443
+    else:
+        port = 80
+    try:
+        with socket.create_connection((host, port), timeout=0.4):
+            return True
+    except OSError:
+        return False
 
 
 def _export_turn_span(
@@ -175,6 +205,13 @@ def _export_turn_span(
         ]
     }
     endpoint = otlp_http.rstrip("/") + "/v1/traces"
+    if not _otlp_port_open(otlp_http):
+        _log(
+            "traces skipped: nothing listening on "
+            f"{endpoint} (no collector). Not a hard failure — "
+            "eval artifact is still written. Start Jaeger for live traces."
+        )
+        return
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
@@ -191,9 +228,14 @@ def _export_turn_span(
                 f"eval rubric={eval_result.rubric} pass={eval_result.passed} "
                 f"score={eval_result.score}"
             )
-    except urllib.error.URLError as exc:
-        _log(f"turn span export skipped ({endpoint}): {exc}")
-        _log("Tool spans may still appear; parent span needs OTLP/HTTP :4318.")
+    except urllib.error.URLError:
+        # Port closed between the probe and POST, or the collector refused.
+        # Eval JSON is already written by the caller; this is not a hard failure.
+        _log(
+            "traces skipped: nothing listening on "
+            f"{endpoint} (no collector). Not a hard failure — "
+            "eval artifact is still written. Start Jaeger for live traces."
+        )
 
 
 class McpStreamableClient:
@@ -346,13 +388,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Toy multi-tool agent for agent-obs-lab")
     parser.add_argument(
         "--proxy",
-        default="http://localhost:8001",
-        help="mcp-trace base URL (default: http://localhost:8001)",
+        default=None,
+        help=(
+            "mcp-trace base URL (default: http://localhost:$MCP_TRACE_PORT, "
+            "or http://localhost:8001). Use the Client line run-trace.sh prints."
+        ),
     )
     parser.add_argument(
         "--fail-faq",
         action="store_true",
-        help="Call lookup_faq with an unknown topic to produce a failed span",
+        help="Force a failed rubric (process exits 1 on purpose, not a crash)",
     )
     parser.add_argument(
         "--no-turn-span",
@@ -380,14 +425,15 @@ def main() -> None:
         help="Path for eval JSON (default: artifacts/eval-result.json)",
     )
     args = parser.parse_args()
-    scheme = urlparse(args.proxy).scheme
+    proxy = args.proxy or default_proxy_url()
+    scheme = urlparse(proxy).scheme
     if scheme not in ("http", "https"):
         _log(f"unsupported proxy scheme: {scheme}")
         sys.exit(2)
     art = Path(args.eval_artifact) if args.eval_artifact else None
     sys.exit(
         run_turn(
-            args.proxy,
+            proxy,
             fail_faq=args.fail_faq,
             emit_turn_span=not args.no_turn_span,
             otlp_http=args.otlp_http,
