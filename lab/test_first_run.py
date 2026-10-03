@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import socket
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from lab.agent import _export_turn_span
 from lab.eval import evaluate_turn
@@ -109,3 +114,82 @@ printf 'api=%s host=%s\n' "$AGENT_OBS_DOCKER_API" "$DOCKER_HOST"
     assert "api=1" in proc.stdout
     assert "host=tcp://127.0.0.1:2375" in proc.stdout
     assert "Using the Docker HTTP API" in proc.stderr
+
+
+def test_proxy_default_honors_mcp_trace_port(monkeypatch):
+    """Omitted --proxy follows MCP_TRACE_PORT, not a hardcoded :8001."""
+    monkeypatch.setenv("MCP_TRACE_PORT", "8123")
+    seen: dict[str, str] = {}
+
+    def fake_run(proxy, **kwargs):
+        seen["proxy"] = proxy
+        return 0
+
+    monkeypatch.setattr("lab.agent.run_turn", fake_run)
+    monkeypatch.setattr(sys, "argv", ["agent.py"])
+    from lab.agent import main
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 0
+    assert seen["proxy"] == "http://localhost:8123"
+
+
+def test_explicit_proxy_overrides_mcp_trace_port(monkeypatch):
+    monkeypatch.setenv("MCP_TRACE_PORT", "8123")
+    seen: dict[str, str] = {}
+
+    def fake_run(proxy, **kwargs):
+        seen["proxy"] = proxy
+        return 0
+
+    monkeypatch.setattr("lab.agent.run_turn", fake_run)
+    monkeypatch.setattr(
+        sys, "argv", ["agent.py", "--proxy", "http://127.0.0.1:9000"]
+    )
+    from lab.agent import main
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 0
+    assert seen["proxy"] == "http://127.0.0.1:9000"
+
+
+def test_run_trace_refuses_busy_port(tmp_path: Path):
+    """Preflight exits before mcp-trace can log listening + bind failure."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("0.0.0.0", 0))
+    port = sock.getsockname()[1]
+    sock.listen(1)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ran = tmp_path / "ran"
+    fake = bin_dir / "mcp-trace"
+    fake.write_text(f"#!/bin/sh\necho ran > {ran}\nexit 0\n")
+    fake.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    env["MCP_TRACE_PORT"] = str(port)
+    env.pop("GOPATH", None)
+    try:
+        proc = subprocess.run(
+            [str(ROOT / "scripts" / "run-trace.sh")],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        sock.close()
+    assert proc.returncode == 1, proc.stderr
+    assert "already in use" in proc.stderr
+    assert "bind: address already in use" in proc.stderr
+    assert not ran.exists()
+
+
+def test_readme_client_matches_run_trace_default():
+    readme = (ROOT / "README.md").read_text()
+    script = (ROOT / "scripts" / "run-trace.sh").read_text()
+    printed = "python3 lab/agent.py --proxy http://localhost:${PORT}"
+    assert printed in script
+    assert "python3 lab/agent.py --proxy http://localhost:8001" in readme

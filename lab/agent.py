@@ -17,7 +17,7 @@ to ``agent.turn`` as span attributes + events and land in
 ``artifacts/eval-result.json`` — visible in Jaeger without a second SDK.
 
 Usage:
-  python lab/agent.py                  # talk to http://localhost:8001
+  python lab/agent.py                  # proxy http://localhost:$MCP_TRACE_PORT or :8001
   python lab/agent.py --proxy URL
   python lab/agent.py --fail-faq       # failed rubric; process exits 1 on purpose
   python lab/agent.py --no-turn-span   # skip parent span export (tools still run)
@@ -61,6 +61,16 @@ except ImportError:  # python lab/agent.py without package on PYTHONPATH
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
+
+
+def default_proxy_url() -> str:
+    """mcp-trace base URL when --proxy is omitted.
+
+    Matches scripts/run-trace.sh: MCP_TRACE_PORT (default 8001).
+    """
+    raw = os.environ.get("MCP_TRACE_PORT", "").strip()
+    port = raw if raw.isdigit() else "8001"
+    return f"http://localhost:{port}"
 
 
 def _new_ids() -> tuple[str, str]:
@@ -378,8 +388,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Toy multi-tool agent for agent-obs-lab")
     parser.add_argument(
         "--proxy",
-        default="http://localhost:8001",
-        help="mcp-trace base URL (default: http://localhost:8001)",
+        default=None,
+        help=(
+            "mcp-trace base URL (default: http://localhost:$MCP_TRACE_PORT, "
+            "or http://localhost:8001). Use the Client line run-trace.sh prints."
+        ),
     )
     parser.add_argument(
         "--fail-faq",
@@ -412,14 +425,15 @@ def main() -> None:
         help="Path for eval JSON (default: artifacts/eval-result.json)",
     )
     args = parser.parse_args()
-    scheme = urlparse(args.proxy).scheme
+    proxy = args.proxy or default_proxy_url()
+    scheme = urlparse(proxy).scheme
     if scheme not in ("http", "https"):
         _log(f"unsupported proxy scheme: {scheme}")
         sys.exit(2)
     art = Path(args.eval_artifact) if args.eval_artifact else None
     sys.exit(
         run_turn(
-            args.proxy,
+            proxy,
             fail_faq=args.fail_faq,
             emit_turn_span=not args.no_turn_span,
             otlp_http=args.otlp_http,

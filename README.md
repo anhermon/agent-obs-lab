@@ -192,10 +192,15 @@ A startup **WARN** that OTLP is “not yet connected… spans will be lost silen
 #### Run the toy agent
 
 ```bash
-python3 lab/agent.py
+# Same Client line ./scripts/run-trace.sh prints (default MCP_TRACE_PORT=8001):
+python3 lab/agent.py --proxy http://localhost:8001
 # --fail-faq exits 1 on purpose (failed rubric lab.turn.v1), not a crash:
-python3 lab/agent.py --fail-faq
+python3 lab/agent.py --fail-faq --proxy http://localhost:8001
 ```
+
+That command must match the `Client:` line from `run-trace.sh`. If you set `MCP_TRACE_PORT` to something other than 8001, copy the printed URL — do not run a bare `python3 lab/agent.py` against a busy `:8001` (another checkout still returns exit 0). Omitting `--proxy` uses `http://localhost:$MCP_TRACE_PORT` when that variable is set, otherwise `http://localhost:8001`.
+
+`./scripts/run-trace.sh` checks the listen port first and exits if it is already in use, instead of logging "listening" and then `bind: address already in use`.
 
 You should see ≥2 tool calls (`get_weather`, `calculate`, plus `lookup_faq`), then an **`=== eval ===`** block with rubric `lab.turn.v1`, pass/fail, score (0–1), and per-assertion expected vs actual. The agent also emits an `agent.turn` parent span (OTLP/HTTP `:4318`) with the same `eval.*` attributes/events, injects `traceparent` so tool spans share one `trace_id`, and writes `artifacts/eval-result.json`.
 
