@@ -273,6 +273,9 @@ stop_default_backends
     for name in (
         "agent-obs-lab-dogfood-phoenix-1",
         "agent-obs-lab-dogfood-otel-collector-1",
+    ):
+        assert f"rm -f {name}" in logged
+    for name in (
         "unrelated-jaeger-1",
         "other",
     ):
@@ -317,3 +320,111 @@ start_default_backend
     logged = log.read_text()
     assert "rm -f" not in logged
     assert "down" not in logged
+
+
+def test_ui_only_jaeger_is_not_an_otlp_publisher():
+    """Exposed 4317/tcp plus host :16686 must not be reused."""
+    ports = (
+        "4317-4318/tcp, 5775/udp, 5778/tcp, 9411/tcp, "
+        "14250/tcp, 14268/tcp, 6831-6832/udp, "
+        "0.0.0.0:16686->16686/tcp, [::]:16686->16686/tcp"
+    )
+    line = f"agent-obs-lab-pr9-jaeger-1\tUp 3 minutes\t{ports}\n"
+    script = """
+set -euo pipefail
+source "$1"
+pick_reusable_publisher
+"""
+    out = subprocess.check_output(
+        ["bash", "-c", script, "bash", str(RUN_LOCAL)],
+        input=line,
+        text=True,
+    )
+    assert out.strip() == ""
+
+
+def test_host_port_range_still_counts_as_published():
+    lines = (
+        "agent-obs-lab-jaeger-1\tUp 2 minutes\t"
+        "0.0.0.0:4317-4318->4317-4318/tcp, "
+        "0.0.0.0:16686->16686/tcp\n"
+        "agent-obs-lab-pr9-jaeger-1\tUp\t"
+        "4317-4318/tcp, 0.0.0.0:16686->16686/tcp\n"
+    )
+    script = """
+set -euo pipefail
+source "$1"
+pick_reusable_publisher
+"""
+    out = subprocess.check_output(
+        ["bash", "-c", script, "bash", str(RUN_LOCAL)],
+        input=lines,
+        text=True,
+    )
+    assert out.strip() == "agent-obs-lab-jaeger-1"
+
+
+def test_fanout_blockers_include_sibling_phoenix_and_collector():
+    script = r"""
+set -euo pipefail
+source "$1"
+printf '%s\n' \
+  $'agent-obs-lab-dogfood-phoenix-1\tUp 10 minutes\t4317/tcp, 9090/tcp, 0.0.0.0:6006->6006/tcp' \
+  $'agent-obs-lab-dogfood-otel-collector-1\tCreated\t' \
+  $'agent-obs-lab-pr9-jaeger-1\tUp\t4317-4318/tcp, 0.0.0.0:16686->16686/tcp' \
+  $'other-phoenix-1\tUp\t0.0.0.0:6006->6006/tcp' \
+  $'unrelated-jaeger-1\tUp\t0.0.0.0:16686->16686/tcp' \
+  | names_blocking_fanout
+"""
+    out = subprocess.check_output(
+        ["bash", "-c", script, "bash", str(RUN_LOCAL)],
+        text=True,
+    )
+    assert set(out.split()) == {
+        "agent-obs-lab-dogfood-phoenix-1",
+        "agent-obs-lab-dogfood-otel-collector-1",
+        "agent-obs-lab-pr9-jaeger-1",
+    }
+
+
+def test_ui_only_jaeger_fails_before_otlp_wait(tmp_path: Path):
+    """Default path must not claim a :16686-only Jaeger publishes :4317."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "docker.log"
+    fake = bin_dir / "docker"
+    fake.write_text(
+        f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log}
+if [ "$1" = ps ]; then
+  printf '%s\\t%s\\t%s\\n' \\
+    'agent-obs-lab-pr9-jaeger-1' 'Up 3 minutes' \\
+    '4317-4318/tcp, 0.0.0.0:16686->16686/tcp, [::]:16686->16686/tcp'
+  exit 0
+fi
+if [ "$1" = compose ] && [ "$2" = up ]; then
+  exit 1
+fi
+exit 0
+"""
+    )
+    fake.chmod(0o755)
+    script = r"""
+set -euo pipefail
+source "$1"
+otlp_accepting() { return 1; }
+export PATH="$2:/usr/bin:/bin"
+export AGENT_OBS_DOCKER_API=0
+unset DOCKER_HOST
+start_default_backend
+"""
+    proc = subprocess.run(
+        ["bash", "-c", script, "bash", str(RUN_LOCAL), str(bin_dir)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "reusing running container" not in proc.stdout
+    assert "only maps :16686" in proc.stderr
+    assert "rm -f" not in log.read_text()
