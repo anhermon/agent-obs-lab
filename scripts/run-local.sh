@@ -343,36 +343,87 @@ print(f"started {name} via Docker HTTP API")
 PY
 }
 
-stop_default_backends() {
-  if have_compose; then
-    docker compose -f docker-compose.yml down --remove-orphans >/dev/null 2>&1 || true
-  fi
-  if [[ "${AGENT_OBS_DOCKER_API}" == 1 ]]; then
-    DOCKER_HOST="${DOCKER_HOST:-tcp://127.0.0.1:2375}" python3 - <<'PY'
-import json, os, urllib.request
-host = os.environ["DOCKER_HOST"]
+# Default-path Jaeger containers. Reuse (pick_reusable_publisher) accepts the
+# Compose name agent-obs-lab-jaeger-1 and the docker-run name agent-obs-lab-jaeger.
+# `docker compose down` only removes the current project, so fan-out must also
+# remove these by name or :16686 stays allocated.
+names_of_default_jaegers() {
+  python3 -c '
+import sys
+
+def is_default_jaeger(name: str) -> bool:
+    name = name.lstrip("/")
+    if name in ("agent-obs-lab-jaeger", "agent-obs-lab-jaeger-1"):
+        return True
+    # Sibling checkouts (agent-obs-lab-dogfood-jaeger-1, …) publish the same host ports.
+    if name.endswith("-jaeger-1") and "agent-obs-lab" in name:
+        return True
+    return False
+
+seen = set()
+for line in sys.stdin:
+    name = line.split("\t", 1)[0].strip().lstrip("/")
+    if not name or name in seen or not is_default_jaeger(name):
+        continue
+    seen.add(name)
+    print(name)
+'
+}
+
+api_force_remove_container() {
+  local name="$1"
+  DOCKER_HOST="${DOCKER_HOST:-tcp://127.0.0.1:2375}" python3 - "$name" <<'PY'
+import json, os, sys, urllib.request
+name = sys.argv[1]
+host = os.environ.get("DOCKER_HOST", "tcp://127.0.0.1:2375")
+if not host.startswith("tcp://"):
+    sys.exit(0)
 base = "http://" + host[len("tcp://"):].rstrip("/")
 
 def req(method, path):
     r = urllib.request.Request(base + path, method=method)
     try:
         with urllib.request.urlopen(r, timeout=20) as resp:
-            return resp.status
+            return resp.status, resp.read()
     except Exception:
-        return 0
+        return 0, b""
 
-with urllib.request.urlopen(base + "/containers/json?all=1", timeout=10) as resp:
-    cs = json.loads(resp.read().decode())
-for c in cs:
+status, raw = req("GET", "/containers/json?all=1")
+if status != 200:
+    sys.exit(0)
+for c in json.loads(raw.decode()):
     names = [n.lstrip("/") for n in (c.get("Names") or [])]
-    if "agent-obs-lab-jaeger" in names:
+    if name in names:
         cid = c["Id"]
         req("POST", f"/containers/{cid}/stop")
         req("DELETE", f"/containers/{cid}?force=1")
 PY
+}
+
+remove_container_by_name() {
+  local name="$1"
+  if [[ "${AGENT_OBS_DOCKER_API}" == 1 ]]; then
+    api_force_remove_container "${name}" || true
   else
-    docker rm -f agent-obs-lab-jaeger >/dev/null 2>&1 || true
+    docker rm -f "${name}" >/dev/null 2>&1 || true
   fi
+}
+
+stop_default_backends() {
+  local names name
+  if have_compose; then
+    docker compose -f docker-compose.yml down --remove-orphans >/dev/null 2>&1 || true
+  fi
+  # Listing can fail (no CLI). Still remove the two names reuse accepts.
+  names="$(
+    list_containers_tsv 2>/dev/null | names_of_default_jaegers || true
+    printf '%s\n' agent-obs-lab-jaeger agent-obs-lab-jaeger-1
+  )"
+  names="$(printf '%s\n' "${names}" | awk 'NF && !seen[$0]++')"
+  while IFS= read -r name; do
+    [[ -z "${name}" ]] && continue
+    remove_container_by_name "${name}"
+  done <<< "${names}"
 }
 
 stop_fanout_backends() {
@@ -472,7 +523,7 @@ main() {
       fi
       exit 1
     fi
-    echo "stopping default Jaeger stack (if any) so :4317 is free for the Collector …"
+    echo "stopping default Jaeger (agent-obs-lab-jaeger-1 or agent-obs-lab-jaeger) so :16686 and :4317 are free …"
     stop_default_backends
     echo "starting fan-out stack (Collector → Jaeger + Phoenix; baked config) …"
     docker compose -f docker-compose.fanout.yml up -d --build

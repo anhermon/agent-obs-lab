@@ -193,3 +193,127 @@ def test_readme_client_matches_run_trace_default():
     printed = "python3 lab/agent.py --proxy http://localhost:${PORT}"
     assert printed in script
     assert "python3 lab/agent.py --proxy http://localhost:8001" in readme
+
+
+def test_default_jaeger_names_include_compose_and_exact():
+    """Reuse accepts agent-obs-lab-jaeger-1; fan-out teardown must too."""
+    script = r"""
+set -euo pipefail
+source "$1"
+printf '%s\n' \
+  $'agent-obs-lab-jaeger-1\tUp 13 hours\t0.0.0.0:16686->16686/tcp' \
+  $'agent-obs-lab-jaeger\tExited\t' \
+  $'agent-obs-lab-dogfood-jaeger-1\tUp\t0.0.0.0:16686->16686/tcp' \
+  $'agent-obs-lab-dogfood-phoenix-1\tUp\t6006->6006/tcp' \
+  $'agent-obs-lab-dogfood-otel-collector-1\tUp\t4317->4317/tcp' \
+  $'unrelated-jaeger-1\tUp\t0.0.0.0:16686->16686/tcp' \
+  $'other\trunning\t4317->4317/tcp' \
+  | names_of_default_jaegers
+"""
+    out = subprocess.check_output(
+        ["bash", "-c", script, "bash", str(RUN_LOCAL)],
+        text=True,
+    )
+    assert set(out.split()) == {
+        "agent-obs-lab-jaeger-1",
+        "agent-obs-lab-jaeger",
+        "agent-obs-lab-dogfood-jaeger-1",
+    }
+
+
+def test_fanout_stop_removes_reused_jaeger_names(tmp_path: Path):
+    """Compose down of this project is not enough; rm the reused Jaeger names."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "docker.log"
+    fake = bin_dir / "docker"
+    fake.write_text(
+        f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log}
+if [ "$1" = ps ]; then
+  printf '%s\\t%s\\t%s\\n' \\
+    'agent-obs-lab-jaeger-1' 'Up 13 hours' '0.0.0.0:16686->16686/tcp, 0.0.0.0:4317->4317/tcp' \\
+    'agent-obs-lab-jaeger' 'Exited' '' \\
+    'agent-obs-lab-dogfood-jaeger-1' 'Up' '0.0.0.0:16686->16686/tcp' \\
+    'agent-obs-lab-dogfood-phoenix-1' 'Up' '0.0.0.0:6006->6006/tcp' \\
+    'agent-obs-lab-dogfood-otel-collector-1' 'Up' '0.0.0.0:4317->4317/tcp' \\
+    'unrelated-jaeger-1' 'Up' '0.0.0.0:16686->16686/tcp' \\
+    'other' 'running' '4317->4317/tcp'
+  exit 0
+fi
+exit 0
+"""
+    )
+    fake.chmod(0o755)
+    script = r"""
+set -euo pipefail
+source "$1"
+export PATH="$2:/usr/bin:/bin"
+export AGENT_OBS_DOCKER_API=0
+unset DOCKER_HOST
+command -v docker
+stop_default_backends
+"""
+    proc = subprocess.run(
+        ["bash", "-c", script, "bash", str(RUN_LOCAL), str(bin_dir)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().endswith("/docker")
+    assert str(bin_dir) in proc.stdout
+    logged = log.read_text()
+    for name in (
+        "agent-obs-lab-jaeger-1",
+        "agent-obs-lab-jaeger",
+        "agent-obs-lab-dogfood-jaeger-1",
+    ):
+        assert f"rm -f {name}" in logged
+    for name in (
+        "agent-obs-lab-dogfood-phoenix-1",
+        "agent-obs-lab-dogfood-otel-collector-1",
+        "unrelated-jaeger-1",
+        "other",
+    ):
+        assert f"rm -f {name}" not in logged
+    assert "compose -f docker-compose.yml down" in logged
+
+
+def test_default_path_reuses_jaeger_without_removing_it(tmp_path: Path):
+    """No --fanout: a live compose Jaeger is reused, not rm'd."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "docker.log"
+    fake = bin_dir / "docker"
+    fake.write_text(
+        f"""#!/bin/sh
+printf '%s\\n' "$*" >> {log}
+if [ "$1" = ps ]; then
+  printf '%s\\t%s\\t%s\\n' \\
+    'agent-obs-lab-jaeger-1' 'Up 2 minutes' '0.0.0.0:4317->4317/tcp, 0.0.0.0:16686->16686/tcp'
+  exit 0
+fi
+exit 0
+"""
+    )
+    fake.chmod(0o755)
+    script = r"""
+set -euo pipefail
+source "$1"
+export PATH="$2:/usr/bin:/bin"
+export AGENT_OBS_DOCKER_API=0
+unset DOCKER_HOST
+start_default_backend
+"""
+    proc = subprocess.run(
+        ["bash", "-c", script, "bash", str(RUN_LOCAL), str(bin_dir)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "reusing running container agent-obs-lab-jaeger-1" in proc.stdout
+    logged = log.read_text()
+    assert "rm -f" not in logged
+    assert "down" not in logged
