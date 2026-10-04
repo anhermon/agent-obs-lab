@@ -84,11 +84,31 @@ is missing but http://127.0.0.1:2375/_ping succeeds.
 ERR
 }
 
-# stdin: name<TAB>status<TAB>ports  (status "Up…"/"running"; ports text contains 4317)
-# stdout: one running container publishing 4317, else empty. Prefer our Jaeger names.
+# stdin: name<TAB>status<TAB>ports  (status "Up…"/"running")
+# stdout: one running container with host port 4317 published, else empty.
+# Prefer our Jaeger names. An exposed "4317/tcp" without "-> " is not enough.
 pick_reusable_publisher() {
   python3 -c '
 import sys
+
+def host_publishes(ports: str, port: int) -> bool:
+    """True when ports text maps host port, not merely exposes it."""
+    for token in ports.replace(",", " ").split():
+        if "->" not in token:
+            continue
+        host = token.split("->", 1)[0]
+        if host.startswith("["):
+            host = host.split("]", 1)[-1].lstrip(":")
+        elif ":" in host:
+            host = host.rsplit(":", 1)[-1]
+        if "-" in host:
+            left, right = host.split("-", 1)
+            if left.isdigit() and right.isdigit() and int(left) <= port <= int(right):
+                return True
+        elif host.isdigit() and int(host) == port:
+            return True
+    return False
+
 
 rows = []
 for line in sys.stdin:
@@ -97,7 +117,9 @@ for line in sys.stdin:
         continue
     name, status, ports = parts[0].lstrip("/"), parts[1], parts[2]
     running = status.lower().startswith("up") or status.lower() == "running"
-    if running and "4317" in ports:
+    # Host bind only. "4317-4318/tcp" is an exposed container port on a
+    # Jaeger that maps :16686 and must not count as an OTLP publisher.
+    if running and host_publishes(ports, 4317):
         rows.append(name)
 
 def rank(name: str) -> tuple:
@@ -370,6 +392,35 @@ for line in sys.stdin:
 '
 }
 
+# Fan-out binds :16686 (Jaeger), :6006 (Phoenix), :4317 and :4318 (Collector).
+# Compose down only removes this project. Sibling checkouts
+# (agent-obs-lab-dogfood-phoenix-1, …) keep those host ports unless named here.
+names_blocking_fanout() {
+  python3 -c '
+import sys
+
+def is_default_jaeger(name: str) -> bool:
+    if name in ("agent-obs-lab-jaeger", "agent-obs-lab-jaeger-1"):
+        return True
+    return name.endswith("-jaeger-1") and "agent-obs-lab" in name
+
+def blocks_fanout(name: str) -> bool:
+    if is_default_jaeger(name):
+        return True
+    if "agent-obs-lab" not in name:
+        return False
+    return name.endswith("-phoenix-1") or name.endswith("-otel-collector-1")
+
+seen = set()
+for line in sys.stdin:
+    name = line.split("\t", 1)[0].strip().lstrip("/")
+    if not name or name in seen or not blocks_fanout(name):
+        continue
+    seen.add(name)
+    print(name)
+'
+}
+
 api_force_remove_container() {
   local name="$1"
   DOCKER_HOST="${DOCKER_HOST:-tcp://127.0.0.1:2375}" python3 - "$name" <<'PY'
@@ -416,7 +467,7 @@ stop_default_backends() {
   fi
   # Listing can fail (no CLI). Still remove the two names reuse accepts.
   names="$(
-    list_containers_tsv 2>/dev/null | names_of_default_jaegers || true
+    list_containers_tsv 2>/dev/null | names_blocking_fanout || true
     printf '%s\n' agent-obs-lab-jaeger agent-obs-lab-jaeger-1
   )"
   names="$(printf '%s\n' "${names}" | awk 'NF && !seen[$0]++')"
@@ -476,6 +527,7 @@ start_default_backend() {
         echo "compose up failed but :4317 is already served by ${holder:-an existing listener}; reusing it"
         return 0
       fi
+      echo "no container is publishing host :4317. A Jaeger that only maps :16686 is not reused as the trace backend." >&2
       return 1
     fi
   else
@@ -486,6 +538,7 @@ start_default_backend() {
         echo "reusing running container ${holder:-listener} (already publishing :4317)"
         return 0
       fi
+      echo "no container is publishing host :4317. A Jaeger that only maps :16686 is not reused as the trace backend." >&2
       return 1
     fi
   fi
@@ -523,7 +576,7 @@ main() {
       fi
       exit 1
     fi
-    echo "stopping default Jaeger (agent-obs-lab-jaeger-1 or agent-obs-lab-jaeger) so :16686 and :4317 are free …"
+    echo "stopping Jaeger plus any sibling Phoenix or collector holding :16686, :6006, :4317, or :4318 …"
     stop_default_backends
     echo "starting fan-out stack (Collector → Jaeger + Phoenix; baked config) …"
     docker compose -f docker-compose.fanout.yml up -d --build

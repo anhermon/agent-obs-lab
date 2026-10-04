@@ -140,7 +140,7 @@ mcp-trace version
 # UI: http://localhost:16686
 ```
 
-If Jaeger is already running (`agent-obs-lab-jaeger-1` or `agent-obs-lab-jaeger` publishing `:4317`), the script **reuses** it instead of failing with "port is already allocated". With no `docker` CLI, a daemon that answers `http://127.0.0.1:2375/_ping` is enough for this default path (HTTP API). Compose / fan-out still need a client:
+If Jaeger is already running (`agent-obs-lab-jaeger-1` or `agent-obs-lab-jaeger` with **host** port `:4317` published), the script **reuses** it instead of failing with "port is already allocated". A container that only maps `:16686` is not reused: `4317` in the ports list can be an exposed container port (`4317-4318/tcp`) with nothing listening on the host. With no `docker` CLI, a daemon that answers `http://127.0.0.1:2375/_ping` is enough for this default path (HTTP API). Compose / fan-out still need a client:
 
 ```bash
 export DOCKER_HOST=tcp://127.0.0.1:2375
@@ -155,7 +155,7 @@ export DOCKER_HOST=tcp://127.0.0.1:2375
 # Phoenix: http://localhost:6006
 ```
 
-Collector config is **baked into the image** (`docker/Dockerfile.otel-collector`) so `--fanout` works when `DOCKER_HOST` is TCP (host bind-mounts of the yaml resolve on the daemon FS and become empty dirs). `run-local.sh --fanout` also tears down the default Jaeger stack first and fails if the Collector container is not running — so a stale `:4317` listener cannot make the script exit 0.
+Collector config is **baked into the image** (`docker/Dockerfile.otel-collector`) so `--fanout` works when `DOCKER_HOST` is TCP (host bind-mounts of the yaml resolve on the daemon FS and become empty dirs). `run-local.sh --fanout` tears down the default Jaeger stack first, including a sibling checkout's Jaeger, Phoenix (`:6006`), and Collector (`:4317`/`:4318`), then fails if the Collector container is not running — so a stale listener cannot make the script exit 0.
 
 **No Compose? `docker run` one-liner for Jaeger:**
 
@@ -175,7 +175,7 @@ docker run -d --name agent-obs-lab-jaeger \
 | `docker: command not found` but `:2375` answers `_ping` | `./scripts/run-local.sh` uses the daemon HTTP API for default Jaeger (no hard fail). For Compose / fan-out, install a Docker **client** and `export DOCKER_HOST=tcp://127.0.0.1:2375` |
 | `docker: command not found` and nothing on `:2375` | Install a Docker **client** (e.g. `apt install docker.io`). If the daemon is TCP-only: `export DOCKER_HOST=tcp://127.0.0.1:2375` |
 | `Cannot connect … unix:///var/run/docker.sock` | Daemon may be TCP-only: `export DOCKER_HOST=tcp://127.0.0.1:2375` |
-| `:4317` already allocated (`agent-obs-lab-jaeger-1`) | Re-run `./scripts/run-local.sh` — it reuses the running Jaeger instead of starting a second one |
+| `:4317` already published on the host (`agent-obs-lab-jaeger-1`) | Re-run `./scripts/run-local.sh` — it reuses that Jaeger. A Jaeger that only maps `:16686` is not reused |
 | `docker compose` missing / Debian has no `docker-compose-v2` package | Install the [Compose plugin binary](https://github.com/docker/compose/releases) into `~/.docker/cli-plugins/docker-compose`, **or** use the `docker run` one-liner above |
 | Fan-out Collector crash / empty `/etc/otelcol/config.yaml` under TCP `DOCKER_HOST` | Do **not** bind-mount the yaml; use the baked image (`up -d --build`). Prefer `./scripts/run-local.sh --fanout` |
 | `--fanout` exited 0 but `:4317` is dead / wrong stack | Default Jaeger may still own the port. Re-run `./scripts/run-local.sh` (no flag) or `--fanout` — the script stops the other stack and asserts the Collector is running |
