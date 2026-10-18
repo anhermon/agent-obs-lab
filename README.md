@@ -119,13 +119,13 @@ mkdir -p ~/.local/bin
 # example after download/extract:
 install -m 0755 ./mcp-trace ~/.local/bin/mcp-trace
 export PATH="$HOME/.local/bin:$PATH"
-mcp-trace version   # expect v2.0.3+
+mcp-trace version   # expect v2.0.4+
 ```
 
 **Option B — `go install` (put `GOPATH/bin` on PATH):**
 
 ```bash
-go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@v2.0.3
+go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@v2.0.4
 export PATH="$(go env GOPATH)/bin:$PATH"   # required — go install does not do this for you
 mcp-trace version
 ```
