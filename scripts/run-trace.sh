@@ -21,7 +21,7 @@ mcp-trace not found on PATH.
 Install (pick one):
 
   # Go install (then put GOPATH/bin on PATH):
-  go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@v2.0.3
+  go install github.com/anhermon/mcp-trace/v2/cmd/mcp-trace@v2.0.4
   export PATH="$(go env GOPATH)/bin:$PATH"
 
   # Or download a release binary (no Go required):
